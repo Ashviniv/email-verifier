@@ -112,31 +112,43 @@ func newSMTPClient(domain, proxyURI string) (*smtp.Client, error) {
 	// mutex for data race
 	var mutex sync.Mutex
 
-	// Attempt to connect to all SMTP servers concurrently
-	for _, r := range mxRecords {
-		addr := r.Host + smtpPort
+	go func() {
+		// try primary mail server first
+		addr := mxRecords[0].Host + smtpPort
+		c, err := dialSMTP(addr, proxyURI)
+		err = errors.New("test")
+		if err == nil {
+			ch <- c
+		} else {
+			// Attempt to connect to all secondary SMTP servers concurrently
+			for _, r := range mxRecords[1:] {
+				addr := r.Host[0:len(r.Host)-1] + smtpPort
 
-		go func() {
-			c, err := dialSMTP(addr, proxyURI)
-			if err != nil {
-				if !done {
-					ch <- err
-				}
-				return
+				go func() {
+
+					c, err := dialSMTP(addr, proxyURI)
+					if err != nil {
+						if !done {
+							ch <- err
+						}
+						return
+					}
+
+					// Place the client on the channel or close it
+					mutex.Lock()
+					switch {
+					case !done:
+						done = true
+						ch <- c
+					default:
+						c.Close()
+					}
+					mutex.Unlock()
+				}()
 			}
 
-			// Place the client on the channel or close it
-			mutex.Lock()
-			switch {
-			case !done:
-				done = true
-				ch <- c
-			default:
-				c.Close()
-			}
-			mutex.Unlock()
-		}()
-	}
+		}
+	}()
 
 	// Collect errors or return a client
 	var errs []error
